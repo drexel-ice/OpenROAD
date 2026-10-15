@@ -42,6 +42,22 @@ sta::define_cmd_args "global_placement" {\
     [-disable_pin_density_adjust]\
     [-random_seed random_seed]\
     [-perturb_dist perturb_dist]\
+    [-ml_wirelength_predictions file]\
+    [-ml_wirelength_alpha alpha]\
+    [-ml_wirelength_ratio_limits ratio_limits]\
+    [-ml_prediction_coverage_policy policy]\
+    [-ml_prediction_min_coverage coverage]\
+    [-ml_wirelength_report file]\
+    [-ml_wirelength_update_mode mode]\
+    [-ml_wirelength_update_interval iterations]\
+    [-ml_wirelength_update_ema factor]\
+    [-ml_wirelength_update_max_delta fraction]\
+    [-ml_wirelength_anchored_exponent exponent]\
+    [-ml_wirelength_progress_limits progress_limits]\
+    [-ml_wirelength_iteration_report file]\
+    [-ml_wirelength_tail_iterations iterations]\
+    [-ml_wirelength_tail_report file]\
+    [-post_initial_place_tcl file]\
     [-enable_routing_congestion]
 }
 
@@ -66,6 +82,22 @@ proc global_placement { args } {
       -virtual_cts_max_skew_fraction \
       -random_seed \
       -perturb_dist \
+      -ml_wirelength_predictions \
+      -ml_wirelength_alpha \
+      -ml_wirelength_ratio_limits \
+      -ml_prediction_coverage_policy \
+      -ml_prediction_min_coverage \
+      -ml_wirelength_report \
+      -ml_wirelength_update_mode \
+      -ml_wirelength_update_interval \
+      -ml_wirelength_update_ema \
+      -ml_wirelength_update_max_delta \
+      -ml_wirelength_anchored_exponent \
+      -ml_wirelength_progress_limits \
+      -ml_wirelength_iteration_report \
+      -ml_wirelength_tail_iterations \
+      -ml_wirelength_tail_report \
+      -post_initial_place_tcl \
       -pad_left -pad_right} \
     flags {-skip_initial_place \
       -force_center_initial_place \
@@ -108,10 +140,54 @@ proc global_placement { args } {
     gpl::replace_initial_place_cmd [array get keys] [array get flags]
 
     if { ![info exists flags(-skip_nesterov_place)] } {
+      # A post-initial-placement hook observes the exact coordinates and HPWL
+      # consumed by Nesterov placement.  This is deliberately sourced after
+      # quadratic initial placement but before NesterovBaseCommon is built.
+      if { [info exists keys(-post_initial_place_tcl)] } {
+        set post_initial_place_args {}
+        source $keys(-post_initial_place_tcl)
+        sta::parse_key_args "post-initial-placement hook" \
+          post_initial_place_args keys {\
+            -ml_wirelength_predictions \
+            -ml_wirelength_alpha \
+            -ml_wirelength_ratio_limits \
+            -ml_prediction_coverage_policy \
+            -ml_prediction_min_coverage \
+            -ml_wirelength_report \
+            -ml_wirelength_update_mode \
+            -ml_wirelength_update_interval \
+            -ml_wirelength_update_ema \
+            -ml_wirelength_update_max_delta \
+            -ml_wirelength_anchored_exponent \
+            -ml_wirelength_progress_limits \
+            -ml_wirelength_iteration_report \
+            -ml_wirelength_tail_iterations \
+            -ml_wirelength_tail_report} flags {}
+        sta::check_argc_eq0 "post-initial-placement hook" \
+          $post_initial_place_args
+      }
       gpl::replace_nesterov_place_cmd [array get keys] [array get flags]
     }
   }
   gpl::replace_reset_cmd
+}
+
+sta::define_cmd_args "write_ml_net_features" {\
+    -file file\
+    -feature_set_id feature_set_id\
+    [-preserve_lineage]
+}
+
+proc write_ml_net_features { args } {
+  sta::parse_key_args "write_ml_net_features" args \
+    keys {-file -feature_set_id} flags {-preserve_lineage}
+  sta::check_argc_eq0 "write_ml_net_features" $args
+  if { ![info exists keys(-file)] || ![info exists keys(-feature_set_id)] } {
+    utl::error GPL 186 "-file and -feature_set_id are required."
+  }
+  set preserve_lineage [info exists flags(-preserve_lineage)]
+  gpl::write_ml_net_features_cmd \
+    $keys(-file) $keys(-feature_set_id) $preserve_lineage
 }
 
 sta::define_cmd_args "cluster_flops" {\

@@ -1196,7 +1196,20 @@ NesterovPlaceVars::NesterovPlaceVars(const PlaceOptions& options)
       timingDrivenRepairTiming(options.timingDrivenRepairTiming),
       timingDrivenRepairTnsEndPercent(options.timingDrivenRepairTnsEndPercent),
       routability_driven_mode(options.routabilityDrivenMode),
-      disableRevertIfDiverge(options.disableRevertIfDiverge)
+      disableRevertIfDiverge(options.disableRevertIfDiverge),
+      mlWirelengthAlpha(options.mlWirelengthAlpha),
+      mlWirelengthRatioMin(options.mlWirelengthRatioMin),
+      mlWirelengthRatioMax(options.mlWirelengthRatioMax),
+      mlWirelengthUpdateMode(options.mlWirelengthUpdateMode),
+      mlWirelengthUpdateInterval(options.mlWirelengthUpdateInterval),
+      mlWirelengthUpdateEma(options.mlWirelengthUpdateEma),
+      mlWirelengthUpdateMaxDelta(options.mlWirelengthUpdateMaxDelta),
+      mlWirelengthAnchoredExponent(options.mlWirelengthAnchoredExponent),
+      mlWirelengthProgressMin(options.mlWirelengthProgressMin),
+      mlWirelengthProgressMax(options.mlWirelengthProgressMax),
+      mlWirelengthIterationReport(options.mlWirelengthIterationReport),
+      mlWirelengthTailIterations(options.mlWirelengthTailIterations),
+      mlWirelengthTailReport(options.mlWirelengthTailReport)
 {
 }
 
@@ -4533,6 +4546,13 @@ bool NesterovBase::checkConvergence(int gpl_iter_count,
   }
 
   return false;
+}
+
+void NesterovBase::resumeForMlTail()
+{
+  pb_->unlockAll();
+  isConverged_ = false;
+  resetMinSumOverflow();
 }
 
 bool NesterovBase::checkDivergence()

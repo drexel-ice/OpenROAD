@@ -43,6 +43,7 @@ add_library(gpl_lib
   src/graphicsNone.cpp
   src/solver.cpp
   src/mbff.cpp
+  src/mlWirelength.cpp
 )
 
 # --- HPWL & FFT backends: runtime switch (Strategy + Factory) ---

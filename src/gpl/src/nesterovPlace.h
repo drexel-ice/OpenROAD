@@ -120,6 +120,8 @@ class NesterovPlace
   void cleanReportsDirs(const std::string& timing_driven_dir,
                         const std::string& routability_driven_dir) const;
   void doBackTracking(float coeff);
+  void updateMlWirelengthWeights(int accepted_iteration);
+  void startMlWirelengthTail(int convergence_iteration);
   void reportResults(int nesterov_iter,
                      int64_t original_area,
                      int64_t td_accumulated_delta_area);

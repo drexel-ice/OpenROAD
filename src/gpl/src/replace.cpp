@@ -5,9 +5,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <fstream>
 #include <memory>
+#include <numeric>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "AbstractGraphics.h"
 #include "clockBase.h"
@@ -16,6 +21,7 @@
 #include "graphicsNone.h"
 #include "initialPlace.h"
 #include "mbff.h"
+#include "mlWirelength.h"
 #include "nesterovBase.h"
 #include "nesterovPlace.h"
 #include "odb/db.h"
@@ -31,6 +37,10 @@
 #include "utl/Logger.h"
 #include "utl/timer.h"
 #include "utl/validation.h"
+
+#ifdef ENABLE_GPU
+#include "gpu/gpuRuntime.h"
+#endif
 
 namespace gpl {
 
@@ -103,6 +113,381 @@ void Replace::reset()
   tb_.reset();
   rb_.reset();
   cb_.reset();
+}
+
+void Replace::writeMlNetFeatures(const std::string& filename,
+                                 const std::string& feature_set_id,
+                                 const bool preserve_lineage)
+{
+  if (filename.empty() || feature_set_id.empty()) {
+    log_->error(
+        GPL, 1100, "ML feature filename and feature-set id are required.");
+  }
+
+  PlaceOptions options;
+  auto feature_pbc = std::make_shared<PlacerBaseCommon>(db_, options, log_);
+  odb::dbBlock* block = db_->getChip()->getBlock();
+  std::ofstream output(filename);
+  if (!output) {
+    log_->error(GPL, 1101, "Cannot open ML feature file {}.", filename);
+  }
+
+  output << "# openroad_ml_features_v1\n";
+  output << "# feature_set_id=" << feature_set_id << "\n";
+  output << "# dbu_per_micron=" << block->getDbUnitsPerMicron() << "\n";
+  output << "# net_count=" << feature_pbc->getNets().size() << "\n";
+  output << "net_id,net_name,lineage_id,is_special_net,no_of_fanouts,"
+            "hpwl_dbu,x_min_dbu,y_min_dbu,x_max_dbu,y_max_dbu\n";
+
+  for (Net* net : feature_pbc->getNets()) {
+    net->updateBox(false);
+    odb::dbNet* db_net = net->getDbNet();
+    const unsigned int net_id = db_net->getId();
+    const int reference_hpwl = net->getHpwl();
+    std::string lineage_id;
+    auto* lineage = odb::dbStringProperty::find(db_net, "ML_ORIGIN_NET_ID");
+    if (preserve_lineage && lineage != nullptr) {
+      lineage_id = lineage->getValue();
+    } else if (preserve_lineage) {
+      // Nets created after the original export intentionally remain untagged.
+      // The oracle replay reports them as unmappable instead of pretending
+      // that their stage-local OpenDB id is an original net identity.
+      lineage_id.clear();
+    } else {
+      lineage_id = feature_set_id + ":" + std::to_string(net_id);
+    }
+    if (!preserve_lineage && lineage == nullptr) {
+      odb::dbStringProperty::create(
+          db_net, "ML_ORIGIN_NET_ID", lineage_id.c_str());
+    } else if (!preserve_lineage) {
+      lineage->setValue(lineage_id.c_str());
+    }
+    auto* reference_hpwl_property
+        = odb::dbIntProperty::find(db_net, "ML_REFERENCE_HPWL_DBU");
+    if (reference_hpwl_property == nullptr) {
+      odb::dbIntProperty::create(
+          db_net, "ML_REFERENCE_HPWL_DBU", reference_hpwl);
+    } else {
+      reference_hpwl_property->setValue(reference_hpwl);
+    }
+    const std::size_t pin_count = net->getPins().size();
+    const std::size_t fanout_count = pin_count == 0 ? 0 : pin_count - 1;
+    output << net_id << ',' << mlCsvEscape(db_net->getName()) << ','
+           << mlCsvEscape(lineage_id) << ',' << (db_net->isSpecial() ? 1 : 0)
+           << ',' << fanout_count << ',' << reference_hpwl << ',' << net->lx()
+           << ',' << net->ly() << ',' << net->ux() << ',' << net->uy() << '\n';
+  }
+  output.close();
+  if (!output) {
+    log_->error(
+        GPL, 1102, "Failed while writing ML feature file {}.", filename);
+  }
+  log_->info(GPL,
+             1103,
+             "Exported {} ML net feature rows to {}.",
+             feature_pbc->getNets().size(),
+             filename);
+}
+
+void Replace::applyMlWirelengthPredictions(const PlaceOptions& options)
+{
+  if (options.mlWirelengthPredictions.empty()) {
+    return;
+  }
+  if (options.mlWirelengthAlpha < 0.0f || options.mlWirelengthAlpha > 1.0f) {
+    log_->error(GPL, 1104, "-ml_wirelength_alpha must be in [0, 1].");
+  }
+  if (!(options.mlWirelengthRatioMin > 0.0f)
+      || options.mlWirelengthRatioMin > options.mlWirelengthRatioMax) {
+    log_->error(
+        GPL, 1105, "-ml_wirelength_ratio_limits must be positive and ordered.");
+  }
+  if (options.mlPredictionMinCoverage < 0.0f
+      || options.mlPredictionMinCoverage > 1.0f) {
+    log_->error(GPL, 1106, "-ml_prediction_min_coverage must be in [0, 1].");
+  }
+  const std::string& policy = options.mlPredictionCoveragePolicy;
+  if (policy != "strict" && policy != "unity_fallback" && policy != "minimum") {
+    log_->error(
+        GPL, 1107, "Unknown ML prediction coverage policy '{}'.", policy);
+  }
+  const std::string& update_mode = options.mlWirelengthUpdateMode;
+  if (update_mode != "fixed" && update_mode != "current_ratio"
+      && update_mode != "anchored" && update_mode != "tail_unity"
+      && update_mode != "tail_initial" && update_mode != "tail_current") {
+    log_->error(
+        GPL, 1121, "Unknown ML wirelength update mode '{}'.", update_mode);
+  }
+  if (options.mlWirelengthUpdateInterval <= 0) {
+    log_->error(GPL, 1122, "-ml_wirelength_update_interval must be positive.");
+  }
+  if (!(options.mlWirelengthUpdateEma > 0.0f)
+      || options.mlWirelengthUpdateEma > 1.0f) {
+    log_->error(GPL, 1123, "-ml_wirelength_update_ema must be in (0, 1].");
+  }
+  if (options.mlWirelengthUpdateMaxDelta < 0.0f) {
+    log_->error(
+        GPL, 1124, "-ml_wirelength_update_max_delta must be nonnegative.");
+  }
+  if (options.mlWirelengthAnchoredExponent < 0.0f) {
+    log_->error(
+        GPL, 1125, "-ml_wirelength_anchored_exponent must be nonnegative.");
+  }
+  if (!(options.mlWirelengthProgressMin > 0.0f)
+      || options.mlWirelengthProgressMin > options.mlWirelengthProgressMax) {
+    log_->error(GPL,
+                1126,
+                "-ml_wirelength_progress_limits must be positive and ordered.");
+  }
+  const bool tail_mode = update_mode == "tail_unity"
+                         || update_mode == "tail_initial"
+                         || update_mode == "tail_current";
+  if (tail_mode && options.mlWirelengthTailIterations <= 0) {
+    log_->error(GPL,
+                1133,
+                "ML tail mode '{}' requires a positive "
+                "-ml_wirelength_tail_iterations value.",
+                update_mode);
+  }
+
+#ifdef ENABLE_GPU
+  if (gpuEnabled()) {
+    log_->error(GPL,
+                1108,
+                "ML wirelength injection is CPU-only in v1; set ENABLE_GPU=0.");
+  }
+#endif
+
+  MlPredictionFile prediction_file;
+  try {
+    prediction_file = readMlPredictionFile(options.mlWirelengthPredictions);
+  } catch (const std::exception& error) {
+    log_->error(GPL, 1109, "{}", error.what());
+  }
+
+  odb::dbBlock* block = db_->getChip()->getBlock();
+  if (prediction_file.dbu_per_micron != block->getDbUnitsPerMicron()) {
+    log_->error(GPL,
+                1110,
+                "ML prediction DBU scale {} does not match design scale {}.",
+                prediction_file.dbu_per_micron,
+                block->getDbUnitsPerMicron());
+  }
+  const auto& gnets = nbc_->getGNets();
+  if (prediction_file.expected_net_count != static_cast<int>(gnets.size())
+      || prediction_file.records.size() != gnets.size()) {
+    log_->error(
+        GPL,
+        1111,
+        "ML prediction net count does not match GPL net count ({} metadata, "
+        "{} rows, {} GPL).",
+        prediction_file.expected_net_count,
+        prediction_file.records.size(),
+        gnets.size());
+  }
+
+  struct AppliedRecord
+  {
+    GNet* net;
+    const MlPredictionRecord* prediction;
+    int64_t hpwl;
+    int64_t gpl_internal_hpwl;
+    double raw_ratio = 1.0;
+    double clipped_ratio = 1.0;
+    double normalized_ratio = 1.0;
+    double final_weight = 1.0;
+    std::string reason;
+  };
+  std::vector<AppliedRecord> applied;
+  applied.reserve(gnets.size());
+  int declared_eligible_count = 0;
+  int applicable_count = 0;
+  int valid_count = 0;
+  double clipped_sum = 0.0;
+
+  for (GNet* gnet : gnets) {
+    odb::dbNet* db_net = gnet->getPbNet()->getDbNet();
+    const unsigned int net_id = db_net->getId();
+    const auto found = prediction_file.records.find(net_id);
+    if (found == prediction_file.records.end()) {
+      log_->error(
+          GPL, 1112, "ML prediction row missing for net id {}.", net_id);
+    }
+    const std::string expected_lineage
+        = prediction_file.feature_set_id + ":" + std::to_string(net_id);
+    auto* lineage = odb::dbStringProperty::find(db_net, "ML_ORIGIN_NET_ID");
+    if (lineage == nullptr || lineage->getValue() != expected_lineage) {
+      log_->error(
+          GPL, 1113, "ML feature-set lineage mismatch for net id {}.", net_id);
+    }
+
+    auto* reference_hpwl
+        = odb::dbIntProperty::find(db_net, "ML_REFERENCE_HPWL_DBU");
+    if (reference_hpwl == nullptr) {
+      log_->error(GPL,
+                  1120,
+                  "ML reference HPWL is missing for net id {}; export features "
+                  "immediately after initial placement before applying "
+                  "predictions.",
+                  net_id);
+    }
+
+    gnet->updateBox();
+    AppliedRecord row{gnet,
+                      &found->second,
+                      reference_hpwl->getValue(),
+                      gnet->getHpwl(),
+                      1.0,
+                      1.0,
+                      1.0,
+                      1.0,
+                      {}};
+    if (!found->second.eligible) {
+      row.reason = "ineligible";
+    } else {
+      declared_eligible_count++;
+      if (row.hpwl <= 0) {
+        row.reason = "zero_hpwl";
+      } else if (!found->second.predicted_wirelength_dbu.has_value()) {
+        applicable_count++;
+        row.reason = "missing_or_invalid_prediction";
+      } else {
+        applicable_count++;
+        valid_count++;
+        row.raw_ratio = *found->second.predicted_wirelength_dbu / row.hpwl;
+        row.clipped_ratio
+            = std::clamp(row.raw_ratio,
+                         static_cast<double>(options.mlWirelengthRatioMin),
+                         static_cast<double>(options.mlWirelengthRatioMax));
+        clipped_sum += row.clipped_ratio;
+        row.reason = "applied";
+      }
+    }
+    applied.push_back(std::move(row));
+  }
+
+  if (declared_eligible_count != prediction_file.eligible_net_count) {
+    log_->error(
+        GPL,
+        1114,
+        "ML eligible net count does not match metadata ({} rows, {} metadata).",
+        declared_eligible_count,
+        prediction_file.eligible_net_count);
+  }
+  const double coverage
+      = applicable_count == 0
+            ? 1.0
+            : static_cast<double>(valid_count) / applicable_count;
+  if (policy == "strict" && valid_count != applicable_count) {
+    log_->error(GPL,
+                1115,
+                "Strict ML coverage failed: {}/{} eligible nets have valid "
+                "predictions.",
+                valid_count,
+                applicable_count);
+  }
+  if (policy == "minimum" && coverage < options.mlPredictionMinCoverage) {
+    log_->error(GPL,
+                1116,
+                "ML prediction coverage {:.3f} is below required {:.3f}.",
+                coverage,
+                options.mlPredictionMinCoverage);
+  }
+
+  const double clipped_mean
+      = valid_count == 0 ? 1.0 : clipped_sum / valid_count;
+  for (AppliedRecord& row : applied) {
+    if (row.reason == "applied") {
+      row.normalized_ratio = row.clipped_ratio / clipped_mean;
+      row.final_weight
+          = options.mlWirelengthAlpha == 0.0f || tail_mode
+                ? 1.0
+                : (1.0 - options.mlWirelengthAlpha)
+                      + options.mlWirelengthAlpha * row.normalized_ratio;
+      row.net->setMlWirelengthState(*row.prediction->predicted_wirelength_dbu,
+                                    row.hpwl,
+                                    row.normalized_ratio);
+    }
+    row.net->setCustomWeight(static_cast<float>(row.final_weight));
+  }
+
+  if (!options.mlWirelengthReport.empty()) {
+    std::ofstream report(options.mlWirelengthReport);
+    if (!report) {
+      log_->error(GPL,
+                  1117,
+                  "Cannot open ML wirelength report {}.",
+                  options.mlWirelengthReport);
+    }
+    report << "net_id,net_name,lineage_id,eligible,predicted_wirelength_dbu,"
+              "current_hpwl_dbu,raw_ratio,clipped_ratio,normalized_ratio,"
+              "custom_weight,reason,gpl_internal_hpwl_dbu\n";
+    for (const AppliedRecord& row : applied) {
+      odb::dbNet* db_net = row.net->getPbNet()->getDbNet();
+      auto* lineage = odb::dbStringProperty::find(db_net, "ML_ORIGIN_NET_ID");
+      report << db_net->getId() << ',' << mlCsvEscape(db_net->getName()) << ','
+             << mlCsvEscape(lineage ? lineage->getValue() : "") << ','
+             << (row.prediction->eligible ? 1 : 0) << ',';
+      if (row.prediction->predicted_wirelength_dbu.has_value()) {
+        report << *row.prediction->predicted_wirelength_dbu;
+      }
+      report << ',' << row.hpwl << ',' << row.raw_ratio << ','
+             << row.clipped_ratio << ',' << row.normalized_ratio << ','
+             << row.final_weight << ',' << row.reason << ','
+             << row.gpl_internal_hpwl << '\n';
+    }
+    report.close();
+    if (!report) {
+      log_->error(GPL,
+                  1118,
+                  "Failed while writing ML wirelength report {}.",
+                  options.mlWirelengthReport);
+    }
+  }
+
+  if ((update_mode == "current_ratio" || update_mode == "anchored")
+      && !options.mlWirelengthIterationReport.empty()) {
+    std::ofstream report(options.mlWirelengthIterationReport);
+    if (!report) {
+      log_->error(GPL,
+                  1131,
+                  "Cannot open ML weight iteration report {}.",
+                  options.mlWirelengthIterationReport);
+    }
+    report << "iteration,mode,eligible_nets,current_hpwl_sum_dbu,"
+              "raw_signal_mean,bounded_signal_mean,normalized_signal_mean,"
+              "target_weight_mean,applied_weight_mean,applied_weight_min,"
+              "applied_weight_max,changed_nets\n";
+    if (!report) {
+      log_->error(GPL,
+                  1132,
+                  "Failed while writing ML weight iteration report {}.",
+                  options.mlWirelengthIterationReport);
+    }
+  }
+
+  log_->info(GPL,
+             1119,
+             "Applied ML wirelength weights to {}/{} eligible nets "
+             "(coverage {:.3f}, alpha {:.3f}).",
+             valid_count,
+             applicable_count,
+             coverage,
+             options.mlWirelengthAlpha);
+  log_->info(GPL,
+             1127,
+             "ML wirelength update mode is '{}' (interval {}, EMA {:.3f}, "
+             "maximum fractional change {:.3f}).",
+             update_mode,
+             options.mlWirelengthUpdateInterval,
+             options.mlWirelengthUpdateEma,
+             options.mlWirelengthUpdateMaxDelta);
+  log_->metric("globalplace__ml__declared_eligible_nets",
+               declared_eligible_count);
+  log_->metric("globalplace__ml__applicable_nets", applicable_count);
+  log_->metric("globalplace__ml__valid_predictions", valid_count);
+  log_->metric("globalplace__ml__prediction_coverage", coverage);
+  log_->metric("globalplace__ml__alpha", options.mlWirelengthAlpha);
 }
 
 void Replace::addPlacementCluster(const Cluster& cluster)
@@ -317,6 +702,8 @@ bool Replace::initNesterovPlace(const PlaceOptions& options,
 
     nbc_ = std::make_shared<NesterovBaseCommon>(
         nbVars, pbc_, log_, threads, clusters_);
+
+    applyMlWirelengthPredictions(options);
 
     for (const auto& pb : pbVec_) {
       nbVec_.push_back(std::make_shared<NesterovBase>(nbVars, pb, nbc_, log_));

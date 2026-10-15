@@ -47,6 +47,14 @@ or_integration_tests(
     region01
   PASSFAIL_TESTS
     incremental02
+    ml_wirelength_alpha0
+    ml_wirelength_dynamic
+    ml_wirelength_equal
+    ml_wirelength_fallback
+    ml_wirelength_minimum
+    ml_wirelength_nonuniform
+    ml_wirelength_strict
+    ml_wirelength_tail
     place_ios01
     place_ios_top_layer
 )
@@ -92,6 +100,14 @@ if(ENABLE_GPU)
   set_property(TEST gpl.region01_gpu.tcl APPEND PROPERTY
     ENVIRONMENT "ENABLE_GPU=1")
   set_property(TEST gpl.region01_gpu_asym.tcl APPEND PROPERTY
+    ENVIRONMENT "ENABLE_GPU=1")
+
+  or_integration_tests(
+    "gpl"
+    PASSFAIL_TESTS
+      ml_wirelength_gpu_reject
+  )
+  set_property(TEST gpl.ml_wirelength_gpu_reject.tcl APPEND PROPERTY
     ENVIRONMENT "ENABLE_GPU=1")
 endif()
 
@@ -193,6 +209,27 @@ if(ENABLE_GPU)
 endif()
 
 add_dependencies(build_and_test fft_test mbff_test placer_base_test)
+
+add_executable(ml_wirelength_test
+  ml_wirelength_test.cpp
+  ../src/mlWirelength.cpp
+)
+
+target_include_directories(ml_wirelength_test
+  PRIVATE
+  ../src
+)
+
+target_link_libraries(ml_wirelength_test
+  GTest::gtest
+  GTest::gtest_main
+)
+
+gtest_discover_tests(ml_wirelength_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+add_dependencies(build_and_test ml_wirelength_test)
 
 # GPU FFT correctness test. Built only on ENABLE_GPU=ON: it links the GPU FFT
 # backend (src/gpl/src/gpu/gpuFftBackend.cpp) via gpl_lib and, with the default

@@ -272,6 +272,20 @@ class GNet
   float getTimingWeight() const { return timingWeight_; }
   float getCustomWeight() const { return customWeight_; }
 
+  void setMlWirelengthState(double predicted_wirelength,
+                            int64_t reference_hpwl,
+                            double initial_model_score)
+  {
+    hasMlWirelengthState_ = true;
+    mlPredictedWirelength_ = predicted_wirelength;
+    mlReferenceHpwl_ = reference_hpwl;
+    mlInitialModelScore_ = initial_model_score;
+  }
+  bool hasMlWirelengthState() const { return hasMlWirelengthState_; }
+  double getMlPredictedWirelength() const { return mlPredictedWirelength_; }
+  int64_t getMlReferenceHpwl() const { return mlReferenceHpwl_; }
+  double getMlInitialModelScore() const { return mlInitialModelScore_; }
+
   void addGPin(GPin* gPin);
   void clearGPins() { gPins_.clear(); }
   void updateBox();
@@ -323,6 +337,10 @@ class GNet
 
   float timingWeight_ = 1;
   float customWeight_ = 1;
+  bool hasMlWirelengthState_ = false;
+  double mlPredictedWirelength_ = 0.0;
+  int64_t mlReferenceHpwl_ = 0;
+  double mlInitialModelScore_ = 1.0;
 
   //
   // weighted average WL model stor for better indexing
@@ -825,6 +843,20 @@ struct NesterovPlaceVars
   const bool routability_driven_mode;
   const bool disableRevertIfDiverge;
 
+  const float mlWirelengthAlpha;
+  const float mlWirelengthRatioMin;
+  const float mlWirelengthRatioMax;
+  const std::string mlWirelengthUpdateMode;
+  const int mlWirelengthUpdateInterval;
+  const float mlWirelengthUpdateEma;
+  const float mlWirelengthUpdateMaxDelta;
+  const float mlWirelengthAnchoredExponent;
+  const float mlWirelengthProgressMin;
+  const float mlWirelengthProgressMax;
+  const std::string mlWirelengthIterationReport;
+  const int mlWirelengthTailIterations;
+  const std::string mlWirelengthTailReport;
+
   bool debug = false;
   int debug_pause_iterations = 10;
   int debug_update_iterations = 10;
@@ -1208,6 +1240,7 @@ class NesterovBase
                         int routability_gpl_iter_count,
                         RouteBase* rb);
   void resetConverged() { isConverged_ = false; }
+  void resumeForMlTail();
 
   bool checkDivergence();
   void saveSnapshot();

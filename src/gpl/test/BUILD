@@ -53,6 +53,14 @@ TESTS = [
 
 PASSFAIL_TESTS = [
     "incremental02",
+    "ml_wirelength_alpha0",
+    "ml_wirelength_dynamic",
+    "ml_wirelength_equal",
+    "ml_wirelength_fallback",
+    "ml_wirelength_minimum",
+    "ml_wirelength_nonuniform",
+    "ml_wirelength_strict",
+    "ml_wirelength_tail",
     "place_ios01",
     "place_ios_top_layer",
 ]
@@ -211,6 +219,17 @@ cc_test(
         "//src/tst",
         "//src/utl",
         "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ml_wirelength_test",
+    srcs = ["ml_wirelength_test.cpp"],
+    deps = [
+        "//src/gpl",
+        "//src/gpl:gpl_private_hdrs",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],

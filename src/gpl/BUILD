@@ -21,6 +21,7 @@ cc_library(
     hdrs = [
         "src/fft.h",
         "src/fftBackend.h",
+        "src/mlWirelength.h",
         "src/nesterovBase.h",
         "src/nesterovPlace.h",
         "src/placerBase.h",
@@ -63,6 +64,7 @@ cc_library(
         "src/initialPlace.cpp",
         "src/initialPlace.h",
         "src/mbff.cpp",
+        "src/mlWirelength.cpp",
         "src/nesterovBase.cpp",
         "src/nesterovPlace.cpp",
         "src/placerBase.cpp",

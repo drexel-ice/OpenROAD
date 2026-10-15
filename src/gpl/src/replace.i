@@ -84,6 +84,50 @@ static gpl::PlaceOptions getOptions(
            options.timingDrivenRepairTnsEndPercent);
   checkKey(keys, "-random_seed", options.initialPlacePerturbationSeed);
   checkKey(keys, "-perturb_dist", options.initialPlacePerturbationDist);
+  if (auto it = keys.find("-ml_wirelength_predictions"); it != keys.end()) {
+    options.mlWirelengthPredictions = it->second;
+  }
+  checkKey(keys, "-ml_wirelength_alpha", options.mlWirelengthAlpha);
+  checkKey(keys,
+           "-ml_wirelength_ratio_limits",
+           std::tie(options.mlWirelengthRatioMin,
+                    options.mlWirelengthRatioMax));
+  if (auto it = keys.find("-ml_prediction_coverage_policy"); it != keys.end()) {
+    options.mlPredictionCoveragePolicy = it->second;
+  }
+  checkKey(keys,
+           "-ml_prediction_min_coverage",
+           options.mlPredictionMinCoverage);
+  if (auto it = keys.find("-ml_wirelength_report"); it != keys.end()) {
+    options.mlWirelengthReport = it->second;
+  }
+  if (auto it = keys.find("-ml_wirelength_update_mode"); it != keys.end()) {
+    options.mlWirelengthUpdateMode = it->second;
+  }
+  checkKey(keys,
+           "-ml_wirelength_update_interval",
+           options.mlWirelengthUpdateInterval);
+  checkKey(keys, "-ml_wirelength_update_ema", options.mlWirelengthUpdateEma);
+  checkKey(keys,
+           "-ml_wirelength_update_max_delta",
+           options.mlWirelengthUpdateMaxDelta);
+  checkKey(keys,
+           "-ml_wirelength_anchored_exponent",
+           options.mlWirelengthAnchoredExponent);
+  checkKey(keys,
+           "-ml_wirelength_progress_limits",
+           std::tie(options.mlWirelengthProgressMin,
+                    options.mlWirelengthProgressMax));
+  if (auto it = keys.find("-ml_wirelength_iteration_report");
+      it != keys.end()) {
+    options.mlWirelengthIterationReport = it->second;
+  }
+  checkKey(keys,
+           "-ml_wirelength_tail_iterations",
+           options.mlWirelengthTailIterations);
+  if (auto it = keys.find("-ml_wirelength_tail_report"); it != keys.end()) {
+    options.mlWirelengthTailReport = it->second;
+  }
 
   if (auto it = keys.find("-density"); it != keys.end()) {
     if (it->second == "uniform") {
@@ -181,6 +225,15 @@ get_global_placement_uniform_density_cmd(
   Replace* replace = getReplace();
   int threads = ord::OpenRoad::openRoad()->getThreadCount();
   return replace->getUniformTargetDensity(options, threads);
+}
+
+void
+write_ml_net_features_cmd(const char* filename,
+                          const char* feature_set_id,
+                          bool preserve_lineage)
+{
+  Replace* replace = getReplace();
+  replace->writeMlNetFeatures(filename, feature_set_id, preserve_lineage);
 }
 
 void

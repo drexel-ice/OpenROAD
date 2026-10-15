@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -1091,6 +1093,11 @@ int NesterovPlace::doNesterovPlace(int start_iter)
 
   // Core Nesterov Loop
   int nesterov_iter = start_iter;
+  const bool ml_tail_enabled
+      = npVars_.mlWirelengthTailIterations > 0
+        && npVars_.mlWirelengthUpdateMode.starts_with("tail_");
+  bool ml_tail_active = false;
+  int ml_tail_completed = 0;
   for (; nesterov_iter < npVars_.maxNesterovIter; nesterov_iter++) {
     const float prevA = curA;
 
@@ -1113,6 +1120,11 @@ int NesterovPlace::doNesterovPlace(int start_iter)
     }
 
     updateNextIter(nesterov_iter);
+
+    // Refresh adaptive ML weights only after a Nesterov step has been
+    // accepted.  Keeping this outside doBackTracking() makes the objective
+    // constant throughout each line search.
+    updateMlWirelengthWeights(nesterov_iter + 1);
 
     updateIterGraphics(nesterov_iter,
                        reports_dir,
@@ -1162,8 +1174,27 @@ int NesterovPlace::doNesterovPlace(int start_iter)
                    routability_driven_revert_count,
                    curA);
 
+    if (ml_tail_active) {
+      ml_tail_completed++;
+      if (ml_tail_completed >= npVars_.mlWirelengthTailIterations) {
+        log_->info(GPL,
+                   1137,
+                   "Completed {} accepted ML tail iterations at iteration {}.",
+                   ml_tail_completed,
+                   nesterov_iter);
+        break;
+      }
+      continue;
+    }
+
     if (isConverged(nesterov_iter, routability_gpl_iter_count_)) {
-      break;
+      if (!ml_tail_enabled) {
+        break;
+      }
+      startMlWirelengthTail(nesterov_iter);
+      ml_tail_active = true;
+      curA = 1.0f;
+      npVars_.maxNesterovIter += npVars_.mlWirelengthTailIterations;
     }
   }
 
@@ -1256,6 +1287,258 @@ void NesterovPlace::updateNextIter(int iter)
       is_min_hpwl_ = false;
     }
   }
+}
+
+void NesterovPlace::updateMlWirelengthWeights(int accepted_iteration)
+{
+  if (npVars_.mlWirelengthUpdateMode == "fixed"
+      || npVars_.mlWirelengthUpdateMode.starts_with("tail_")
+      || npVars_.mlWirelengthAlpha == 0.0f
+      || accepted_iteration % npVars_.mlWirelengthUpdateInterval != 0) {
+    return;
+  }
+
+  struct WeightUpdate
+  {
+    GNet* net;
+    int64_t current_hpwl;
+    double raw_signal;
+    double bounded_signal;
+  };
+
+  std::vector<WeightUpdate> updates;
+  updates.reserve(nbc_->getGNets().size());
+  double bounded_sum = 0.0;
+  int64_t current_hpwl_sum = 0;
+
+  for (GNet* gnet : nbc_->getGNets()) {
+    if (!gnet->hasMlWirelengthState()) {
+      continue;
+    }
+    gnet->updateBox();
+    const int64_t current_hpwl = gnet->getHpwl();
+    if (current_hpwl <= 0 || gnet->getMlReferenceHpwl() <= 0) {
+      continue;
+    }
+
+    double raw_signal = 1.0;
+    double bounded_signal = 1.0;
+    if (npVars_.mlWirelengthUpdateMode == "current_ratio") {
+      raw_signal = gnet->getMlPredictedWirelength() / current_hpwl;
+      bounded_signal
+          = std::clamp(raw_signal,
+                       static_cast<double>(npVars_.mlWirelengthRatioMin),
+                       static_cast<double>(npVars_.mlWirelengthRatioMax));
+    } else {
+      const double raw_progress
+          = static_cast<double>(current_hpwl) / gnet->getMlReferenceHpwl();
+      raw_signal = std::pow(raw_progress, npVars_.mlWirelengthAnchoredExponent);
+      const double bounded_progress
+          = std::clamp(raw_signal,
+                       static_cast<double>(npVars_.mlWirelengthProgressMin),
+                       static_cast<double>(npVars_.mlWirelengthProgressMax));
+      bounded_signal = gnet->getMlInitialModelScore() * bounded_progress;
+    }
+    if (!std::isfinite(bounded_signal) || bounded_signal <= 0.0) {
+      continue;
+    }
+    updates.push_back(
+        WeightUpdate{gnet, current_hpwl, raw_signal, bounded_signal});
+    bounded_sum += bounded_signal;
+    current_hpwl_sum += current_hpwl;
+  }
+
+  if (updates.empty() || bounded_sum <= 0.0) {
+    return;
+  }
+
+  const double bounded_mean = bounded_sum / updates.size();
+  double raw_sum = 0.0;
+  double normalized_sum = 0.0;
+  double target_sum = 0.0;
+  double applied_sum = 0.0;
+  double applied_min = std::numeric_limits<double>::max();
+  double applied_max = std::numeric_limits<double>::lowest();
+  int changed_nets = 0;
+
+  for (const WeightUpdate& update : updates) {
+    const double normalized_signal = update.bounded_signal / bounded_mean;
+    const double target_weight
+        = (1.0 - npVars_.mlWirelengthAlpha)
+          + npVars_.mlWirelengthAlpha * normalized_signal;
+    const double old_weight = update.net->getCustomWeight();
+    double applied_weight
+        = old_weight
+          + npVars_.mlWirelengthUpdateEma * (target_weight - old_weight);
+    if (npVars_.mlWirelengthUpdateMaxDelta > 0.0f) {
+      const double lower
+          = old_weight * (1.0 - npVars_.mlWirelengthUpdateMaxDelta);
+      const double upper
+          = old_weight * (1.0 + npVars_.mlWirelengthUpdateMaxDelta);
+      applied_weight = std::clamp(applied_weight, lower, upper);
+    }
+    if (applied_weight != old_weight) {
+      changed_nets++;
+    }
+    update.net->setCustomWeight(static_cast<float>(applied_weight));
+    raw_sum += update.raw_signal;
+    normalized_sum += normalized_signal;
+    target_sum += target_weight;
+    applied_sum += applied_weight;
+    applied_min = std::min(applied_min, applied_weight);
+    applied_max = std::max(applied_max, applied_weight);
+  }
+
+  // The accepted position now has a changed objective.  Refresh its
+  // wirelength forces and current gradients once so the next outer iteration
+  // starts from a self-consistent state.
+  nbc_->updateWireLengthForceWA(wireLengthCoefX_, wireLengthCoefY_);
+  for (auto& nb : nbVec_) {
+    npUpdateCurGradient(nb);
+  }
+
+  if (!npVars_.mlWirelengthIterationReport.empty()) {
+    std::ofstream report(npVars_.mlWirelengthIterationReport, std::ios::app);
+    if (!report) {
+      log_->error(GPL,
+                  1128,
+                  "Cannot append ML weight iteration report {}.",
+                  npVars_.mlWirelengthIterationReport);
+    }
+    report << accepted_iteration << ',' << npVars_.mlWirelengthUpdateMode << ','
+           << updates.size() << ',' << current_hpwl_sum << ','
+           << raw_sum / updates.size() << ',' << bounded_mean << ','
+           << normalized_sum / updates.size() << ','
+           << target_sum / updates.size() << ',' << applied_sum / updates.size()
+           << ',' << applied_min << ',' << applied_max << ',' << changed_nets
+           << '\n';
+    if (!report) {
+      log_->error(GPL,
+                  1129,
+                  "Failed while appending ML weight iteration report {}.",
+                  npVars_.mlWirelengthIterationReport);
+    }
+  }
+
+  log_->info(GPL,
+             1130,
+             "Refreshed {} adaptive ML net weights after accepted iteration "
+             "{} (range {:.4f} to {:.4f}).",
+             changed_nets,
+             accepted_iteration,
+             applied_min,
+             applied_max);
+}
+
+void NesterovPlace::startMlWirelengthTail(int convergence_iteration)
+{
+  struct TailWeight
+  {
+    GNet* net;
+    int64_t current_hpwl;
+    double raw_ratio;
+    double clipped_ratio;
+    double normalized_ratio = 1.0;
+    double custom_weight = 1.0;
+  };
+
+  for (auto& nb : nbVec_) {
+    nb->resumeForMlTail();
+  }
+
+  std::vector<TailWeight> weights;
+  weights.reserve(nbc_->getGNets().size());
+  double current_clipped_sum = 0.0;
+  for (GNet* gnet : nbc_->getGNets()) {
+    if (!gnet->hasMlWirelengthState()) {
+      gnet->setCustomWeight(1.0f);
+      continue;
+    }
+    gnet->updateBox();
+    const int64_t current_hpwl = gnet->getHpwl();
+    if (current_hpwl <= 0) {
+      gnet->setCustomWeight(1.0f);
+      continue;
+    }
+    const double raw_ratio = gnet->getMlPredictedWirelength() / current_hpwl;
+    const double clipped_ratio
+        = std::clamp(raw_ratio,
+                     static_cast<double>(npVars_.mlWirelengthRatioMin),
+                     static_cast<double>(npVars_.mlWirelengthRatioMax));
+    weights.push_back(TailWeight{gnet, current_hpwl, raw_ratio, clipped_ratio});
+    current_clipped_sum += clipped_ratio;
+  }
+
+  const double current_clipped_mean
+      = weights.empty() ? 1.0 : current_clipped_sum / weights.size();
+  double custom_weight_sum = 0.0;
+  double custom_weight_min = std::numeric_limits<double>::max();
+  double custom_weight_max = std::numeric_limits<double>::lowest();
+  for (TailWeight& row : weights) {
+    if (npVars_.mlWirelengthUpdateMode == "tail_initial") {
+      row.normalized_ratio = row.net->getMlInitialModelScore();
+    } else if (npVars_.mlWirelengthUpdateMode == "tail_current") {
+      row.normalized_ratio = row.clipped_ratio / current_clipped_mean;
+    }
+    if (npVars_.mlWirelengthUpdateMode != "tail_unity") {
+      row.custom_weight = (1.0 - npVars_.mlWirelengthAlpha)
+                          + npVars_.mlWirelengthAlpha * row.normalized_ratio;
+    }
+    row.net->setCustomWeight(static_cast<float>(row.custom_weight));
+    custom_weight_sum += row.custom_weight;
+    custom_weight_min = std::min(custom_weight_min, row.custom_weight);
+    custom_weight_max = std::max(custom_weight_max, row.custom_weight);
+  }
+
+  nbc_->updateWireLengthForceWA(wireLengthCoefX_, wireLengthCoefY_);
+  for (auto& nb : nbVec_) {
+    npUpdateCurGradient(nb);
+  }
+
+  if (!npVars_.mlWirelengthTailReport.empty()) {
+    std::ofstream report(npVars_.mlWirelengthTailReport);
+    if (!report) {
+      log_->error(GPL,
+                  1134,
+                  "Cannot open ML tail weight report {}.",
+                  npVars_.mlWirelengthTailReport);
+    }
+    report << "net_id,predicted_wirelength_dbu,reference_hpwl_dbu,"
+              "activation_hpwl_dbu,activation_raw_ratio,"
+              "activation_clipped_ratio,activation_normalized_ratio,"
+              "custom_weight,mode,convergence_iteration\n";
+    for (const TailWeight& row : weights) {
+      const odb::dbNet* db_net = row.net->getPbNet()->getDbNet();
+      report << db_net->getId() << ',' << row.net->getMlPredictedWirelength()
+             << ',' << row.net->getMlReferenceHpwl() << ',' << row.current_hpwl
+             << ',' << row.raw_ratio << ',' << row.clipped_ratio << ','
+             << row.normalized_ratio << ',' << row.custom_weight << ','
+             << npVars_.mlWirelengthUpdateMode << ',' << convergence_iteration
+             << '\n';
+    }
+    if (!report) {
+      log_->error(GPL,
+                  1135,
+                  "Failed while writing ML tail weight report {}.",
+                  npVars_.mlWirelengthTailReport);
+    }
+  }
+
+  if (weights.empty()) {
+    custom_weight_min = custom_weight_max = 1.0;
+  }
+  log_->info(GPL,
+             1136,
+             "Starting {} accepted ML tail iterations after convergence at "
+             "iteration {} using mode '{}' and {} eligible nets (weight "
+             "mean {:.4f}, range {:.4f} to {:.4f}).",
+             npVars_.mlWirelengthTailIterations,
+             convergence_iteration,
+             npVars_.mlWirelengthUpdateMode,
+             weights.size(),
+             weights.empty() ? 1.0 : custom_weight_sum / weights.size(),
+             custom_weight_min,
+             custom_weight_max);
 }
 
 void NesterovPlace::updateDb()

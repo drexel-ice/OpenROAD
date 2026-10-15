@@ -107,6 +107,27 @@ struct PlaceOptions
   // Concurrent IO pin + cell placement
   bool placeIosMode = false;
 
+  // Optional, experimental ML wirelength augmentation.  Predictions are
+  // produced outside OpenROAD and are applied as the custom component of a
+  // GNet's weight.  Empty mlWirelengthPredictions keeps the legacy path.
+  std::string mlWirelengthPredictions;
+  float mlWirelengthAlpha = 0.0f;
+  float mlWirelengthRatioMin = 0.5f;
+  float mlWirelengthRatioMax = 2.0f;
+  std::string mlPredictionCoveragePolicy = "strict";
+  float mlPredictionMinCoverage = 0.95f;
+  std::string mlWirelengthReport;
+  std::string mlWirelengthUpdateMode = "fixed";
+  int mlWirelengthUpdateInterval = 10;
+  float mlWirelengthUpdateEma = 0.2f;
+  float mlWirelengthUpdateMaxDelta = 0.1f;
+  float mlWirelengthAnchoredExponent = 0.5f;
+  float mlWirelengthProgressMin = 0.8f;
+  float mlWirelengthProgressMax = 1.25f;
+  std::string mlWirelengthIterationReport;
+  int mlWirelengthTailIterations = 0;
+  std::string mlWirelengthTailReport;
+
   void skipIo();
   void validate(utl::Logger* log);
 };
@@ -150,6 +171,12 @@ class Replace
   // Query for uniform density value
   float getUniformTargetDensity(const PlaceOptions& options, int threads);
 
+  // Export the exact pre-Nesterov net features consumed by the external
+  // predictor.  The feature-set id also namespaces persistent lineage ids.
+  void writeMlNetFeatures(const std::string& filename,
+                          const std::string& feature_set_id,
+                          bool preserve_lineage = false);
+
   void setDebug(int pause_iterations,
                 int update_iterations,
                 bool draw_bins,
@@ -168,6 +195,7 @@ class Replace
   void checkHasCoreRows();
   void checkPlaceIosSupported(const PlaceOptions& options);
   void reportHpwlMetric();
+  void applyMlWirelengthPredictions(const PlaceOptions& options);
 
   odb::dbDatabase* db_ = nullptr;
   sta::dbSta* sta_ = nullptr;
