@@ -36,6 +36,7 @@ if (Python3_FOUND AND BUILD_PYTHON)
 endif()
 
 add_library(utl_lib
+  src/MlWirelength.cpp
   src/Metrics.cpp
   src/CFileUtils.cpp
   src/ScopedTemporaryFile.cpp
@@ -107,4 +108,3 @@ messages(
 if(ENABLE_TESTS)
   add_subdirectory(test)
 endif()
-

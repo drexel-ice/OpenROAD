@@ -148,6 +148,12 @@ Standard Parasitic Exchange Format.
 estimate_parasitics
     -placement|-global_routing
     [-spef_file spef_file]
+    [-ml_wirelength_predictions prediction_file]
+    [-ml_wirelength_alpha alpha]
+    [-ml_wirelength_ratio_limits {minimum maximum}]
+    [-ml_prediction_coverage_policy strict|unity_fallback|minimum]
+    [-ml_prediction_min_coverage coverage]
+    [-ml_wirelength_report report_file]
 ```
 
 #### Options
@@ -156,6 +162,17 @@ estimate_parasitics
 | -------------- | ---------------------------------------------- |
 | `-placement` or `-global_routing` | Either of these flags must be set. Parasitics are estimated based after placement stage versus after global routing stage. |
 | `-spef_file` | Optional. File name to write SPEF files. If more than one corner is available for the design, the files will be written as filename_corner.spef. |
+| `-ml_wirelength_predictions` | Versioned per-net predicted routed-wirelength file. Supported only with `-placement`. |
+| `-ml_wirelength_alpha` | Blend from baseline Steiner RC (`0`) to the bounded predicted-length correction (`1`). |
+| `-ml_wirelength_ratio_limits` | Positive lower and upper bounds for predicted length divided by current Steiner length. Defaults to `{0.5 2.0}`. |
+| `-ml_prediction_coverage_policy` | Behavior for missing eligible predictions: `strict`, `unity_fallback`, or `minimum`. Defaults to `strict`. |
+| `-ml_prediction_min_coverage` | Required valid fraction for `minimum` coverage. Defaults to `0.95`. |
+| `-ml_wirelength_report` | CSV audit of current Steiner length, unclipped/clipped ratio, effective scale, and fallback reason. |
+
+The ML options preserve the existing Steiner topology and scale only the wire
+resistance and capacitance of each nonzero branch. Pin capacitance and via
+resistance are unchanged. The prediction mapping persists for incremental
+placement-parasitics updates until `clear_ml_placement_parasitics` is called.
 
 
 ## Useful Developer Commands

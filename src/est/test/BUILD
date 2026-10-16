@@ -22,6 +22,12 @@ TESTS = [
     "set_wire_rc_rdl_mixed_tech",
 ]
 
+PASSFAIL_TESTS = [
+    "ml_placement_parasitics",
+]
+
+ALL_TESTS = TESTS + PASSFAIL_TESTS
+
 filegroup(
     name = "test_resources",
     # overly broad glob, could be refined later, but
@@ -31,7 +37,7 @@ filegroup(
         ["**/*"],
         exclude = [
             test + "." + ext
-            for test in TESTS
+            for test in ALL_TESTS
             for ext in [
                 "tcl",
                 "py",
@@ -48,6 +54,17 @@ filegroup(
         "//test:asap7_data",
     ],
 ) for test_name in TESTS]
+
+[regression_test(
+    name = test_name,
+    check_log = False,
+    check_passfail = True,
+    data = [
+        ":test_resources",
+        "//test:asap7_ccs_data",
+        "//test:asap7_data",
+    ],
+) for test_name in PASSFAIL_TESTS]
 
 cc_test(
     name = "TestEstimateParasitics",

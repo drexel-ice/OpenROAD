@@ -89,6 +89,15 @@ TEST(MlWirelength, RejectsDuplicateMetadata)
   EXPECT_THROW(readMlPredictionFile(file.string()), std::runtime_error);
 }
 
+TEST(MlWirelength, TreatsNonpositivePredictionsAsMissing)
+{
+  PredictionFile file(std::string(kMetadata) + "11,1,0\n12,1,-4.5\n");
+  const MlPredictionFile predictions = readMlPredictionFile(file.string());
+
+  EXPECT_FALSE(predictions.records.at(11).predicted_wirelength_dbu.has_value());
+  EXPECT_FALSE(predictions.records.at(12).predicted_wirelength_dbu.has_value());
+}
+
 TEST(MlWirelength, EscapesAuditNamesAsCsv)
 {
   EXPECT_EQ(mlCsvEscape("plain"), "plain");

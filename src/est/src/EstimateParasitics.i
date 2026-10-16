@@ -289,6 +289,33 @@ estimate_parasitics_cmd(ParasiticsSrc src, const char* path)
   spef_files.clear();
 }
 
+void
+set_ml_placement_parasitics_cmd(const char* prediction_file,
+                                double alpha,
+                                double ratio_min,
+                                double ratio_max,
+                                const char* coverage_policy,
+                                double minimum_coverage,
+                                const char* report_file)
+{
+  ensureLinked();
+  est::EstimateParasitics* estimate_parasitics = getEstimateParasitics();
+  estimate_parasitics->setMlPlacementWirelength(prediction_file,
+                                                alpha,
+                                                ratio_min,
+                                                ratio_max,
+                                                coverage_policy,
+                                                minimum_coverage,
+                                                report_file);
+}
+
+void
+clear_ml_placement_parasitics_cmd()
+{
+  ensureLinked();
+  getEstimateParasitics()->clearMlPlacementWirelength();
+}
+
 // For debugging. Does not protect against annotating power/gnd.
 void
 estimate_parasitic_net(const Net *net)

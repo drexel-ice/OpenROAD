@@ -24,6 +24,7 @@ cc_library(
         "src/CommandLineProgress.cpp",
         "src/CommandLineProgress.h",
         "src/Logger.cpp",
+        "src/MlWirelength.cpp",
         "src/Metrics.cpp",
         "src/Progress.cpp",
         "src/ScopedTemporaryFile.cpp",
@@ -40,6 +41,7 @@ cc_library(
     hdrs = [
         "include/utl/CFileUtils.h",
         "include/utl/Logger.h",
+        "include/utl/MlWirelength.h",
         "include/utl/Metrics.h",
         "include/utl/Progress.h",
         "include/utl/ScopedTemporaryFile.h",

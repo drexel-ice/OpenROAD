@@ -18,6 +18,12 @@ or_integration_tests(
     set_wire_rc_rdl_mixed_tech
 )
 
+or_integration_tests(
+  "est"
+  PASSFAIL_TESTS
+    ml_placement_parasitics
+)
+
 add_executable(TestEstimateParasitics cpp/TestEstimateParasitics.cc)
 target_link_libraries(TestEstimateParasitics
         OpenSTA

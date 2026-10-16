@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -217,7 +218,7 @@ void EstimateParasitics::setVWireSignalRC(odb::dbTech* tech,
 // Defined outside the header; all instantiations live in this file.
 template <typename T>
 const std::vector<T>& EstimateParasitics::resolveWireRC(
-    std::vector<T> WireRC::*category) const
+    std::vector<T> WireRC::* category) const
 {
   static const std::vector<T> empty;
   odb::dbTech* tech = currentTech();
@@ -425,6 +426,9 @@ void EstimateParasitics::initChip(odb::dbChip* chip)
   }
 
   if (block_ != block) {
+    // Prediction net IDs and lineage are scoped to one block.  Never carry a
+    // configured map into a subsequently loaded design in the same process.
+    clearMlPlacementWirelength();
     if (db_cbk_->hasOwner()) {
       db_cbk_->removeOwner();
     }
@@ -444,6 +448,134 @@ void EstimateParasitics::estimateParasitics(ParasiticsSrc src)
 {
   std::map<sta::Scene*, std::ostream*> spef_streams;
   estimateParasitics(src, spef_streams);
+}
+
+void EstimateParasitics::setMlPlacementWirelength(
+    const std::string& prediction_file,
+    const double alpha,
+    const double ratio_min,
+    const double ratio_max,
+    const std::string& coverage_policy,
+    const double minimum_coverage,
+    const std::string& report_file)
+{
+  initBlock();
+  if (prediction_file.empty()) {
+    logger_->error(EST, 351, "ML placement prediction file is required.");
+  }
+  if (alpha < 0.0 || alpha > 1.0) {
+    logger_->error(EST, 352, "ML placement alpha must be in [0, 1].");
+  }
+  if (!(ratio_min > 0.0) || ratio_min > ratio_max) {
+    logger_->error(
+        EST, 353, "ML placement ratio limits must be positive and ordered.");
+  }
+  if (coverage_policy != "strict" && coverage_policy != "unity_fallback"
+      && coverage_policy != "minimum") {
+    logger_->error(EST,
+                   354,
+                   "Unknown ML placement prediction coverage policy '{}'.",
+                   coverage_policy);
+  }
+  if (minimum_coverage < 0.0 || minimum_coverage > 1.0) {
+    logger_->error(
+        EST, 355, "ML placement minimum coverage must be in [0, 1].");
+  }
+
+  utl::MlPredictionFile predictions;
+  try {
+    predictions = utl::readMlPredictionFile(prediction_file);
+  } catch (const std::exception& error) {
+    logger_->error(EST, 356, "{}", error.what());
+  }
+  if (predictions.dbu_per_micron != block_->getDbUnitsPerMicron()) {
+    logger_->error(EST,
+                   357,
+                   "ML prediction DBU scale {} does not match design scale {}.",
+                   predictions.dbu_per_micron,
+                   block_->getDbUnitsPerMicron());
+  }
+  if (predictions.expected_net_count
+      != static_cast<int>(predictions.records.size())) {
+    logger_->error(EST,
+                   358,
+                   "ML prediction net count does not match its rows ({} "
+                   "metadata, {} rows).",
+                   predictions.expected_net_count,
+                   predictions.records.size());
+  }
+
+  int eligible_count = 0;
+  int valid_count = 0;
+  for (const auto& [net_id, prediction] : predictions.records) {
+    odb::dbNet* net = odb::dbNet::getNet(block_, net_id);
+    if (net == nullptr) {
+      logger_->error(
+          EST, 359, "ML prediction references unknown net id {}.", net_id);
+    }
+    const std::string expected_lineage
+        = predictions.feature_set_id + ":" + std::to_string(net_id);
+    auto* lineage = odb::dbStringProperty::find(net, "ML_ORIGIN_NET_ID");
+    if (lineage == nullptr || lineage->getValue() != expected_lineage) {
+      logger_->error(
+          EST, 360, "ML feature-set lineage mismatch for net id {}.", net_id);
+    }
+    if (prediction.eligible) {
+      eligible_count++;
+      if (prediction.predicted_wirelength_dbu.has_value()) {
+        valid_count++;
+      }
+    }
+  }
+  if (eligible_count != predictions.eligible_net_count) {
+    logger_->error(EST,
+                   361,
+                   "ML eligible net count does not match metadata ({} rows, "
+                   "{} metadata).",
+                   eligible_count,
+                   predictions.eligible_net_count);
+  }
+  const double coverage = eligible_count == 0
+                              ? 1.0
+                              : static_cast<double>(valid_count)
+                                    / static_cast<double>(eligible_count);
+  if (coverage_policy == "strict" && valid_count != eligible_count) {
+    logger_->error(EST,
+                   362,
+                   "Strict ML placement coverage failed: {}/{} eligible nets "
+                   "have valid predictions.",
+                   valid_count,
+                   eligible_count);
+  }
+  if (coverage_policy == "minimum" && coverage < minimum_coverage) {
+    logger_->error(EST,
+                   363,
+                   "ML placement prediction coverage {:.3f} is below required "
+                   "{:.3f}.",
+                   coverage,
+                   minimum_coverage);
+  }
+
+  ml_placement_wirelength_ = MlPlacementWirelengthConfig{std::move(predictions),
+                                                         alpha,
+                                                         ratio_min,
+                                                         ratio_max,
+                                                         coverage_policy,
+                                                         minimum_coverage,
+                                                         report_file};
+  logger_->info(EST,
+                364,
+                "Configured ML placement parasitics for {} prediction rows "
+                "with {:.3f} coverage and alpha {}.",
+                ml_placement_wirelength_->predictions.records.size(),
+                coverage,
+                alpha);
+}
+
+void EstimateParasitics::clearMlPlacementWirelength()
+{
+  ml_placement_wirelength_.reset();
+  ml_placement_wirelength_report_rows_.clear();
 }
 
 void EstimateParasitics::estimateParasitics(
@@ -671,6 +803,7 @@ void EstimateParasitics::clearParasitics()
 void EstimateParasitics::estimateWireParasitics(sta::SpefWriter* spef_writer)
 {
   initBlock();
+  ml_placement_wirelength_report_rows_.clear();
   if (!resolveWireRC(&WireRC::signal_cap).empty()) {
     for (auto mode : sta_->modes()) {
       sta_->ensureClkNetwork(mode);
@@ -707,6 +840,7 @@ void EstimateParasitics::estimateWireParasitics(sta::SpefWriter* spef_writer)
     parasitics_src_ = ParasiticsSrc::kPlacement;
     parasitics_invalid_.clear();
   }
+  writeMlPlacementWirelengthReport();
 }
 
 void EstimateParasitics::estimateWireParasitic(const sta::Net* net,
@@ -813,6 +947,18 @@ void EstimateParasitics::estimateWireParasiticSteiner(
   }
   SteinerTree* tree = makeSteinerTree(drvr_pin);
   if (tree) {
+    int64_t steiner_wirelength_dbu = 0;
+    const int branch_count = tree->branchCount();
+    for (int i = 0; i < branch_count; i++) {
+      odb::Point pt1, pt2;
+      SteinerPt steiner_pt1, steiner_pt2;
+      int wire_length_dbu;
+      tree->branch(i, pt1, steiner_pt1, pt2, steiner_pt2, wire_length_dbu);
+      steiner_wirelength_dbu += wire_length_dbu;
+    }
+    odb::dbNet* db_net = db_network_->staToDb(net);
+    const double ml_wirelength_scale
+        = mlPlacementWirelengthScale(db_net, steiner_wirelength_dbu);
     debugPrint(logger_,
                EST,
                "estimate_parasitics",
@@ -829,7 +975,6 @@ void EstimateParasitics::estimateWireParasiticSteiner(
       bool is_clk = global_router_->isNonLeafClock(db_network_->staToDb(net));
       double wire_cap = 0.0;
       double wire_res = 0.0;
-      const int branch_count = tree->branchCount();
       int max_node_index = tree->getMaxIndex();
       size_t resistor_id = 1;
       for (int i = 0; i < branch_count; i++) {
@@ -869,6 +1014,9 @@ void EstimateParasitics::estimateWireParasiticSteiner(
           parasitics->makeResistor(parasitic, resistor_id++, 1.0e-3, n1, n2);
         } else {
           double length = dbuToMeters(wire_length_dbu);
+          if (ml_wirelength_scale != 1.0) {
+            length *= ml_wirelength_scale;
+          }
           double cap = length * wire_cap;
           double res = length * wire_res;
 
@@ -933,6 +1081,95 @@ void EstimateParasitics::estimateWireParasiticSteiner(
       }
     }
     delete tree;
+  }
+}
+
+double EstimateParasitics::mlPlacementWirelengthScale(
+    odb::dbNet* net,
+    const int64_t steiner_wirelength_dbu)
+{
+  if (!ml_placement_wirelength_.has_value()) {
+    return 1.0;
+  }
+
+  const MlPlacementWirelengthConfig& config = *ml_placement_wirelength_;
+  MlPlacementWirelengthReportRow row;
+  row.net_id = net->getId();
+  row.net_name = net->getName();
+  row.steiner_wirelength_dbu = steiner_wirelength_dbu;
+  row.effective_wirelength_dbu = steiner_wirelength_dbu;
+  if (auto* lineage = odb::dbStringProperty::find(net, "ML_ORIGIN_NET_ID")) {
+    row.lineage_id = lineage->getValue();
+  }
+  if (auto* hpwl = odb::dbIntProperty::find(net, "ML_REFERENCE_HPWL_DBU")) {
+    row.hpwl_dbu = hpwl->getValue();
+  }
+
+  const auto found = config.predictions.records.find(row.net_id);
+  if (found == config.predictions.records.end()) {
+    row.reason = "not_in_prediction_file";
+  } else {
+    const utl::MlPredictionRecord& prediction = found->second;
+    row.eligible = prediction.eligible;
+    row.predicted_wirelength_dbu = prediction.predicted_wirelength_dbu;
+    if (!prediction.eligible) {
+      row.reason = "ineligible";
+    } else if (!prediction.predicted_wirelength_dbu.has_value()) {
+      row.reason = "missing_or_invalid_prediction";
+    } else if (steiner_wirelength_dbu <= 0) {
+      row.reason = "zero_steiner_wirelength";
+    } else {
+      row.raw_ratio = *prediction.predicted_wirelength_dbu
+                      / static_cast<double>(steiner_wirelength_dbu);
+      row.clipped_ratio
+          = std::clamp(row.raw_ratio, config.ratio_min, config.ratio_max);
+      row.effective_scale
+          = config.alpha == 0.0
+                ? 1.0
+                : (1.0 - config.alpha) + config.alpha * row.clipped_ratio;
+      row.effective_wirelength_dbu
+          = steiner_wirelength_dbu * row.effective_scale;
+      row.reason = "applied";
+    }
+  }
+  ml_placement_wirelength_report_rows_.push_back(row);
+  return row.effective_scale;
+}
+
+void EstimateParasitics::writeMlPlacementWirelengthReport()
+{
+  if (!ml_placement_wirelength_.has_value()
+      || ml_placement_wirelength_->report_file.empty()) {
+    return;
+  }
+  const std::string& filename = ml_placement_wirelength_->report_file;
+  std::ofstream report(filename);
+  if (!report) {
+    logger_->error(
+        EST, 365, "Cannot open ML placement parasitics report {}.", filename);
+  }
+  report << "net_id,net_name,lineage_id,eligible,predicted_wirelength_dbu,"
+            "hpwl_dbu,steiner_wirelength_dbu,raw_ratio,clipped_ratio,"
+            "effective_scale,effective_wirelength_dbu,reason\n";
+  for (const MlPlacementWirelengthReportRow& row :
+       ml_placement_wirelength_report_rows_) {
+    report << row.net_id << ',' << utl::mlCsvEscape(row.net_name) << ','
+           << utl::mlCsvEscape(row.lineage_id) << ',' << (row.eligible ? 1 : 0)
+           << ',';
+    if (row.predicted_wirelength_dbu.has_value()) {
+      report << *row.predicted_wirelength_dbu;
+    }
+    report << ',' << row.hpwl_dbu << ',' << row.steiner_wirelength_dbu << ','
+           << row.raw_ratio << ',' << row.clipped_ratio << ','
+           << row.effective_scale << ',' << row.effective_wirelength_dbu << ','
+           << row.reason << '\n';
+  }
+  report.close();
+  if (!report) {
+    logger_->error(EST,
+                   366,
+                   "Failed while writing ML placement parasitics report {}.",
+                   filename);
   }
 }
 

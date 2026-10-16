@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -34,6 +35,7 @@
 #include "sta/Scene.hh"
 #include "stt/SteinerTreeBuilder.h"
 #include "utl/Logger.h"
+#include "utl/MlWirelength.h"
 
 namespace utl {
 class ServiceRegistry;
@@ -148,6 +150,14 @@ class EstimateParasitics : public sta::dbStaState, public ParasiticsService
   void estimateParasitics(ParasiticsSrc src);
   void estimateParasitics(ParasiticsSrc src,
                           std::map<sta::Scene*, std::ostream*>& spef_streams);
+  void setMlPlacementWirelength(const std::string& prediction_file,
+                                double alpha,
+                                double ratio_min,
+                                double ratio_max,
+                                const std::string& coverage_policy,
+                                double minimum_coverage,
+                                const std::string& report_file);
+  void clearMlPlacementWirelength();
   void estimateWireParasitics(sta::SpefWriter* spef_writer = nullptr);
   void estimateWireParasitic(const sta::Net* net,
                              sta::SpefWriter* spef_writer = nullptr);
@@ -217,6 +227,33 @@ class EstimateParasitics : public sta::dbStaState, public ParasiticsService
   utl::Logger* getLogger() { return logger_; }
 
  private:
+  struct MlPlacementWirelengthConfig
+  {
+    utl::MlPredictionFile predictions;
+    double alpha = 1.0;
+    double ratio_min = 0.5;
+    double ratio_max = 2.0;
+    std::string coverage_policy = "strict";
+    double minimum_coverage = 0.95;
+    std::string report_file;
+  };
+
+  struct MlPlacementWirelengthReportRow
+  {
+    unsigned int net_id = 0;
+    std::string net_name;
+    std::string lineage_id;
+    bool eligible = false;
+    std::optional<double> predicted_wirelength_dbu;
+    int64_t hpwl_dbu = 0;
+    int64_t steiner_wirelength_dbu = 0;
+    double raw_ratio = 1.0;
+    double clipped_ratio = 1.0;
+    double effective_scale = 1.0;
+    double effective_wirelength_dbu = 0.0;
+    std::string reason;
+  };
+
   // Wire RC values and layers of one technology, indexed by corner->index()
   struct WireRC
   {
@@ -233,13 +270,16 @@ class EstimateParasitics : public sta::dbStaState, public ParasiticsService
   // Resolve one WireRC category for the current technology; a category left
   // unset for a tech falls back to the defaults (nullptr entry) independently.
   template <typename T>
-  const std::vector<T>& resolveWireRC(std::vector<T> WireRC::*category) const;
+  const std::vector<T>& resolveWireRC(std::vector<T> WireRC::* category) const;
   void ensureParasitics();
   bool isSkipPin(const sta::Pin* pin) const;
   bool isSkipNet(const sta::Net* net) const;
   void estimateWireParasiticSteiner(const sta::Pin* drvr_pin,
                                     const sta::Net* net,
                                     sta::SpefWriter* spef_writer);
+  double mlPlacementWirelengthScale(odb::dbNet* net,
+                                    int64_t steiner_wirelength_dbu);
+  void writeMlPlacementWirelengthReport();
   void makePadParasitic(const sta::Net* net, sta::SpefWriter* spef_writer);
   bool isPadNet(const sta::Net* net) const;
   bool isPadPin(const sta::Pin* pin) const;
@@ -298,6 +338,10 @@ class EstimateParasitics : public sta::dbStaState, public ParasiticsService
   int dbu_ = 0;
 
   bool incremental_parasitics_enabled_ = false;
+
+  std::optional<MlPlacementWirelengthConfig> ml_placement_wirelength_;
+  std::vector<MlPlacementWirelengthReportRow>
+      ml_placement_wirelength_report_rows_;
 
   // constants
   const sta::MinMax* min_ = sta::MinMax::min();

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026, The OpenROAD Authors
 
-#include "mlWirelength.h"
+#include "utl/MlWirelength.h"
 
 #include <algorithm>
 #include <cctype>
@@ -14,7 +14,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace gpl {
+namespace utl {
 
 namespace {
 
@@ -37,7 +37,7 @@ std::string trim(std::string value)
 std::vector<std::string> splitCsv(const std::string& line)
 {
   // Prediction files intentionally contain only numeric fields, so quoted
-  // CSV parsing is unnecessary here.  Audit names live in the feature file.
+  // CSV parsing is unnecessary here. Audit names live in the feature file.
   std::vector<std::string> fields;
   std::stringstream stream(line);
   std::string field;
@@ -190,10 +190,10 @@ MlPredictionFile readMlPredictionFile(const std::string& filename)
           [](const std::string& value, std::size_t* consumed) {
             return std::stod(value, consumed);
           });
-      // A linear regressor trained on zero-valued routed-length targets can
-      // emit finite nonpositive estimates.  Preserve the supplied model
-      // output; the positive ratio limits provide the safety boundary.
-      if (std::isfinite(prediction)) {
+      // Eligible predictions must represent a physical wirelength.  Preserve
+      // malformed/nonpositive values as missing so the selected coverage
+      // policy can reject or explicitly fall back for them.
+      if (std::isfinite(prediction) && prediction > 0.0) {
         record.predicted_wirelength_dbu = prediction;
       }
     }
@@ -228,4 +228,4 @@ std::string mlCsvEscape(const std::string& value)
   return escaped;
 }
 
-}  // namespace gpl
+}  // namespace utl

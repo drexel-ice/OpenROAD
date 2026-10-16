@@ -212,7 +212,6 @@ add_dependencies(build_and_test fft_test mbff_test placer_base_test)
 
 add_executable(ml_wirelength_test
   ml_wirelength_test.cpp
-  ../src/mlWirelength.cpp
 )
 
 target_include_directories(ml_wirelength_test
@@ -223,6 +222,7 @@ target_include_directories(ml_wirelength_test
 target_link_libraries(ml_wirelength_test
   GTest::gtest
   GTest::gtest_main
+  utl_lib
 )
 
 gtest_discover_tests(ml_wirelength_test

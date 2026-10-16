@@ -2,22 +2,79 @@
 # Copyright (c) 2019-2025, The OpenROAD Authors
 
 sta::define_cmd_args "estimate_parasitics" { -placement|-global_routing \
-                                            [-spef_file filename]}
+  [-spef_file filename] \
+  [-ml_wirelength_predictions file] \
+  [-ml_wirelength_alpha alpha] \
+  [-ml_wirelength_ratio_limits ratio_limits] \
+  [-ml_prediction_coverage_policy policy] \
+  [-ml_prediction_min_coverage coverage] \
+  [-ml_wirelength_report file]}
 
 proc estimate_parasitics { args } {
   sta::parse_key_args "estimate_parasitics" args \
-    keys {-spef_file} flags {-placement -global_routing}
+    keys {-spef_file -ml_wirelength_predictions -ml_wirelength_alpha \
+      -ml_wirelength_ratio_limits -ml_prediction_coverage_policy \
+      -ml_prediction_min_coverage -ml_wirelength_report} \
+    flags {-placement -global_routing}
+  sta::check_argc_eq0 "estimate_parasitics" $args
 
   set filename ""
   if { [info exists keys(-spef_file)] } {
     set filename $keys(-spef_file)
   }
 
+  set ml_keys {-ml_wirelength_alpha -ml_wirelength_ratio_limits \
+    -ml_prediction_coverage_policy -ml_prediction_min_coverage \
+    -ml_wirelength_report}
   if { [info exists flags(-placement)] } {
+    set have_ml_predictions [info exists keys(-ml_wirelength_predictions)]
+    foreach key $ml_keys {
+      if { [info exists keys($key)] && !$have_ml_predictions } {
+        utl::error EST 367 \
+          "$key requires -ml_wirelength_predictions."
+      }
+    }
+    if { $have_ml_predictions } {
+      set alpha 1.0
+      if { [info exists keys(-ml_wirelength_alpha)] } {
+        set alpha $keys(-ml_wirelength_alpha)
+      }
+      set ratio_limits {0.5 2.0}
+      if { [info exists keys(-ml_wirelength_ratio_limits)] } {
+        set ratio_limits $keys(-ml_wirelength_ratio_limits)
+      }
+      if { [llength $ratio_limits] != 2 } {
+        utl::error EST 368 \
+          "-ml_wirelength_ratio_limits requires two values."
+      }
+      set coverage_policy "strict"
+      if { [info exists keys(-ml_prediction_coverage_policy)] } {
+        set coverage_policy $keys(-ml_prediction_coverage_policy)
+      }
+      set minimum_coverage 0.95
+      if { [info exists keys(-ml_prediction_min_coverage)] } {
+        set minimum_coverage $keys(-ml_prediction_min_coverage)
+      }
+      set report_file ""
+      if { [info exists keys(-ml_wirelength_report)] } {
+        set report_file $keys(-ml_wirelength_report)
+      }
+      est::set_ml_placement_parasitics_cmd \
+        $keys(-ml_wirelength_predictions) $alpha \
+        [lindex $ratio_limits 0] [lindex $ratio_limits 1] \
+        $coverage_policy $minimum_coverage $report_file
+    }
     if { [est::check_corner_wire_caps] } {
       est::estimate_parasitics_cmd "placement" $filename
     }
   } elseif { [info exists flags(-global_routing)] } {
+    set all_ml_keys [concat {-ml_wirelength_predictions} $ml_keys]
+    foreach key $all_ml_keys {
+      if { [info exists keys($key)] } {
+        utl::error EST 369 \
+          "ML wirelength options are supported only with -placement."
+      }
+    }
     if { [grt::have_routes] } {
       # should check for layer rc
       est::estimate_parasitics_cmd "global_routing" $filename
@@ -27,6 +84,13 @@ proc estimate_parasitics { args } {
   } else {
     utl::error EST 3 "missing -placement or -global_routing flag."
   }
+}
+
+sta::define_cmd_args "clear_ml_placement_parasitics" {}
+
+proc clear_ml_placement_parasitics { args } {
+  sta::check_argc_eq0 "clear_ml_placement_parasitics" $args
+  est::clear_ml_placement_parasitics_cmd
 }
 
 # Units are from OpenSTA (ie Liberty file or set_cmd_units).
